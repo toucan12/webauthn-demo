@@ -78,7 +78,7 @@ let generateServerGetAssertion = (authenticators) => {
         allowCredentials.push({
               type: 'public-key',
               id: authr.credID,
-              transports: ['usb', 'nfc', 'ble']
+              transports: ['internal', 'usb', 'nfc', 'ble']
         })
     }
     return {
@@ -103,7 +103,7 @@ let hash = (data) => {
  * @return {Buffer}               - RAW PKCS encoded public key
  */
 let COSEECDHAtoPKCS = (COSEPublicKey) => {
-    /* 
+    /*
        +------+-------+-------+---------+----------------------------------+
        | name | key   | label | type    | description                      |
        |      | type  |       |         |                                  |
@@ -150,7 +150,7 @@ let ASN1toPEM = (pkBuffer) => {
             }
             Luckily, to do that, we just need to prefix it with constant 26 bytes (metadata is constant).
         */
-        
+
         pkBuffer = Buffer.concat([
             new Buffer.from("3059301306072a8648ce3d020106082a8648ce3d030107034200", "hex"),
             pkBuffer
@@ -171,7 +171,7 @@ let ASN1toPEM = (pkBuffer) => {
     }
 
     PEMKey = `-----BEGIN ${type}-----\n` + PEMKey + `-----END ${type}-----\n`;
-    
+
     return PEMKey
 }
 
@@ -273,6 +273,31 @@ let verifyAuthenticatorAttestationResponse = (webAuthnResponse) => {
                 credID: base64url.encode(authrDataStruct.credID)
             }
         }
+    } else if (ctapMakeCredResp.fmt === 'packed') { // Self signed
+        let authrDataStruct = parseMakeCredAuthData(ctapMakeCredResp.authData);
+        if (!(authrDataStruct.flags & U2F_USER_PRESENTED))
+            throw new Error('User was NOT presented durring authentication!');
+
+        const clientDataHash = hash(base64url.toBuffer(webAuthnResponse.response.clientDataJSON))
+        const publicKey = COSEECDHAtoPKCS(authrDataStruct.COSEPublicKey)
+        const signatureBase = Buffer.concat([ctapMakeCredResp.authData, clientDataHash]);
+        const PEMCertificate = ASN1toPEM(publicKey);
+
+        const { attStmt: { sig: signature, alg } } = ctapMakeCredResp
+
+        response.verified = // Verify that sig is a valid signature over the concatenation of authenticatorData
+            // and clientDataHash using the attestation public key in attestnCert with the algorithm specified in alg.
+            verifySignature(signature, signatureBase, PEMCertificate) && alg === -7
+
+        if (response.verified) {
+            response.authrInfo = {
+                fmt: 'fido-u2f',
+                publicKey: base64url.encode(publicKey),
+                counter: authrDataStruct.counter,
+                credID: base64url.encode(authrDataStruct.credID)
+            }
+        }
+
     } else {
         throw new Error('Unsupported attestation format! ' + ctapMakeCredResp.fmt);
     }
